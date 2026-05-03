@@ -1,0 +1,9 @@
+#!/bin/sh
+
+if systemctl status xray > /dev/null; then
+  systemctl stop xray
+  notify-send -a xray -i network-offline -t 2000 xray 'Xray has been disabled.'
+else
+  systemctl start xray
+  notify-send -a xray -i network-wireless -t 2000 xray 'Xray has been enabled.'
+fi
