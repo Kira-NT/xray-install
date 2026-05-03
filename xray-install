@@ -1,0 +1,774 @@
+#!/bin/sh
+#
+# Downloads and configures Xray.
+
+PROXY=
+XRAY_CORE_URL_TEMPLATE="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-%s.zip"
+GEOIP_URL_CN="https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"
+GEOSITE_URL_CN="https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"
+GEOIP_URL_IR="https://github.com/Chocolate4U/Iran-v2ray-rules/releases/latest/download/geoip.dat"
+GEOSITE_URL_IR="https://github.com/Chocolate4U/Iran-v2ray-rules/releases/latest/download/geosite.dat"
+GEOIP_URL_IR_LITE="https://github.com/Chocolate4U/Iran-v2ray-rules/releases/latest/download/geoip-lite.dat"
+GEOSITE_URL_IR_LITE="https://github.com/Chocolate4U/Iran-v2ray-rules/releases/latest/download/geosite-lite.dat"
+GEOIP_URL_RU="https://github.com/runetfreedom/russia-blocked-geoip/releases/latest/download/geoip.dat"
+GEOSITE_URL_RU="https://github.com/runetfreedom/russia-blocked-geosite/releases/latest/download/geosite.dat"
+GEOIP_URL_RU_LITE="https://github.com/runetfreedom/russia-blocked-geoip/releases/latest/download/geoip-ru-only.dat"
+GEOSITE_URL_RU_LITE="https://github.com/runetfreedom/russia-blocked-geosite/releases/latest/download/geosite-ru-only.dat"
+
+#################################################
+# Formats and prints the provided error message.
+# Arguments:
+#   $1. The error message to format and print.
+# Outputs:
+#   Writes the formatted error message to stderr.
+# Returns:
+#   Always returns 1.
+#################################################
+error() {
+  echo "${0}: ${1}" >& 2
+  return 1
+}
+
+#################################################
+# Formats and prints the provided error message,
+# displays the help page, and terminates the
+# process.
+# Arguments:
+#   $1. The error message to format and print.
+# Outputs:
+#   Writes the formatted error message to stderr.
+# Returns:
+#   Never returns (exits with a status of 1).
+#################################################
+fatal_error() {
+  error "${1}"
+  help >& 2
+  exit 1
+}
+
+#################################################
+# Checks if the specified command exists.
+# Arguments:
+#   $1. The command to check.
+# Returns:
+#   0 if the specified command exists;
+#   otherwise, a non-zero status.
+#################################################
+command_exists() {
+  command -v "${1}" > /dev/null 2>& 1
+}
+
+#################################################
+# Asserts that a command exists, otherwise exits.
+# Arguments:
+#   $1. The command to check.
+# Outputs:
+#   Writes an error message to stderr if missing.
+# Returns:
+#   0 if the specified command exists;
+#   otherwise, never returns.
+#################################################
+assert_command_exists() {
+  command_exists "${1}" && return
+  echo "${1}: command not found: install it using your package manager" >& 2
+  exit 1
+}
+
+#################################################
+# Downloads a file.
+# Arguments:
+#   $1. The URL of the file to download.
+#   $2. The destination of the downloaded file.
+#       If not provided, the file will be written
+#       to stdout.
+# Returns:
+#   0 if the operation succeeds;
+#   otherwise, a non-zero status.
+#################################################
+download() {
+  curl -x "${PROXY}" -fsSLRH "Cache-Control: no-cache" -o "${2}" "${1}" ||
+  error "failed to download '${1}'; please check your network and try again"
+}
+
+#################################################
+# Downloads a file and verifies its integrity.
+# Arguments:
+#   $1. The URL of the file to download.
+#   $2. The destination of the downloaded file.
+#       If not provided, the file will be written
+#       to stdout.
+# Returns:
+#   0 if the file is successfully downloaded and
+#   the checksum verification passes;
+#   otherwise, a non-zero status.
+#################################################
+download_and_verify() {
+  local dir_tmp="$(mktemp -d)"
+  local file_tmp="${dir_tmp}/$(basename "${2}")"
+  local exit_code=1
+
+  if download "${1}" "${file_tmp}"; then
+    local file_hash=$(sha256sum "${file_tmp}" | sed 's/ .*//')
+    local expected_file_hash=$( { download "${1}.sha256sum" "-" || download "${1}.dgst" "-" || echo "${file_hash}"; } | sed 's/SHA2-256= *//;/.*=/d;s/ .*//')
+    [ "${file_hash}" = "${expected_file_hash}" ] && exit_code=0 || error "'${1}' did not match provided hash"
+
+    case "${1}" in *.zip) case "${2}" in *.zip);; *)
+      local current_dir="${PWD}"
+      cd "${dir_tmp}" && mv -f "${file_tmp}" "${file_tmp}.zip" &&
+      unzip -q "${file_tmp}.zip" "$(basename "${2}")" &&
+      file_hash=$(sha256sum "${file_tmp}" | sed 's/ .*//')
+      cd "${current_dir}"
+    ;;esac;;esac
+
+    [ -f "${2}" ] && [ "${file_hash}" = "$(sha256sum "${2}" | sed 's/ .*//')" ] && exit_code=1 && error "'${2}' already exists; skipping"
+  fi
+
+  if [ $exit_code -eq 0 ]; then
+    local file_mode=644
+    [ -x "${file_tmp}" ] && file_mode=755
+
+    install -m 755 -d "$(dirname "${2}")"
+    install -vm $file_mode "${file_tmp}" "${2}"
+  fi
+
+  rm -r "${dir_tmp}"
+  return $exit_code
+}
+
+#################################################
+# Prints the current OS and CPU architecture.
+# Outputs:
+#   Writes the OS identifier and CPU architecture
+#   using the '<os>-<arch>' format to stdout.
+#################################################
+get_os() {
+  case "$(uname -s)" in
+    Linux) printf linux ;;
+    Darwin) printf macos ;;
+    FreeBSD) printf freebsd ;;
+    OpenBSD) printf openbsd ;;
+    CYGWIN*|MINGW*|MSYS*) printf windows ;;
+    *) printf unknown ;;
+  esac
+  printf -
+  case "$(uname -m)" in
+    x86_64|amd64) printf 64 ;;
+    i386|i686) printf 32 ;;
+    aarch64|armv8|arm64) printf arm64-v8a ;;
+    armv5*) printf arm32-v5 ;;
+    armv6l) printf arm32-v6 ;;
+    armv7*) printf arm32-v7a ;;
+    mips64) printf mips64 ;;
+    mips64le) printf mips64le ;;
+    mips) printf mips32 ;;
+    mipsle) printf mips32le ;;
+    ppc64) printf ppc64 ;;
+    ppc64le) printf ppc64le ;;
+    riscv64) printf riscv64 ;;
+    s390x) printf s390x ;;
+    loongarch64) printf loong64 ;;
+    *) printf unknown ;;
+  esac
+}
+
+#################################################
+# Formats an Xray config template.
+# Arguments:
+#   $1. The access log path.
+#   $2. The error log path.
+#   $3. The transparent proxy port value.
+# Outputs:
+#   Writes the formatted config to stdout.
+#################################################
+format_config() {
+  echo '{'
+  echo '  "log": {'
+  echo '    "loglevel": "warning",'
+  echo '    "access": "'"${1}"'",'
+  echo '    "error": "'"${2}"'"'
+  echo '  },'
+  echo '  "dns": {'
+  echo '    "servers": ['
+  echo '    ]'
+  echo '  },'
+  echo '  "routing": {'
+  echo '    "domainStrategy": "IPIfNonMatch",'
+  echo '    "rules": ['
+  echo '    ]'
+  echo '  },'
+  echo '  "inbounds": ['
+  if [ -n "${3}" ]; then
+    echo '    {'
+    echo '      "tag": "dokodemo-in",'
+    echo '      "protocol": "dokodemo-door",'
+    echo '      "port": '"${3}"','
+    echo '      "settings": {'
+    echo '        "network": "tcp,udp",'
+    echo '        "followRedirect": true'
+    echo '      },'
+    echo '      "streamSettings": {'
+    echo '        "sockopt": {'
+    echo '          "tproxy": "tproxy"'
+    echo '        }'
+    echo '      },'
+    echo '      "sniffing": {'
+    echo '        "enabled": true,'
+    echo '        "destOverride": ["http", "tls"]'
+    echo '      }'
+    echo '    }'
+  else
+    echo '    {'
+    echo '      "tag": "socks-in",'
+    echo '      "protocol": "socks",'
+    echo '      "listen": "127.0.0.1",'
+    echo '      "port": 10806,'
+    echo '      "settings": {'
+    echo '        "udp": true'
+    echo '      }'
+    echo '    },'
+    echo '    {'
+    echo '      "tag": "http-in",'
+    echo '      "protocol": "http",'
+    echo '      "listen": "127.0.0.1",'
+    echo '      "port": 10807'
+    echo '    }'
+  fi
+  echo '  ],'
+  echo '  "outbounds": ['
+  echo '    {'
+  echo '      "tag": "direct",'
+  echo '      "protocol": "freedom"'
+  echo '    },'
+  echo '    {'
+  echo '      "tag": "block",'
+  echo '      "protocol": "blackhole"'
+  echo '    }'
+  echo '  ]'
+  echo '}'
+}
+
+#################################################
+# Formats a systemd service unit for the xray
+# executable.
+# Arguments:
+#   $1. The user under which the service runs.
+#   $2. The GID under which the service runs.
+#   $3. The wrapper command, if any.
+#   $4. The main executable to run.
+#   $5. The configuration file path.
+#   $6. The XRAY_LOCATION_ASSET path.
+#   $7. The transparent proxy port value.
+# Outputs:
+#   Writes a complete systemd service unit file
+#   to stdout.
+#################################################
+format_autorun_service() {
+  echo '[Unit]'
+  echo 'Documentation=https://xtls.github.io/en/'
+  echo 'After=network.target nss-lookup.target'
+  echo
+  echo '[Service]'
+  if [ -n "${1}" ]; then
+    echo 'User='"${1}"
+    echo 'CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE'
+    echo 'AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE'
+  fi
+  echo 'NoNewPrivileges=true'
+  echo 'ExecStart='"${3:+"\"${3}\" "}"'"'"${4}"'" run -c "'"${5}"'"'
+  if [ -n "${3}" ]; then
+    echo 'Environment=XRAY_GID='"${2}"
+    echo 'Environment=XRAY_TPROXY_PORT='"${7}"
+  fi
+  echo 'Environment=XRAY_LOCATION_ASSET='"${6}"
+  echo 'Restart=on-failure'
+  echo 'RestartPreventExitStatus=23'
+  echo 'LimitNPROC=10000'
+  echo 'LimitNOFILE=1000000'
+  echo 'RuntimeDirectory=xray'
+  echo 'RuntimeDirectoryMode=0755'
+  echo
+  echo '[Install]'
+  if [ -n "${1}" ]; then
+    echo 'WantedBy=multi-user.target'
+  else
+    echo 'WantedBy=default.target'
+  fi
+}
+
+#################################################
+# Formats a systemd oneshot service unit.
+# Arguments:
+#   $1. The command to execute (ExecStart).
+# Outputs:
+#   Prints the formatted unit to stdout.
+#################################################
+format_oneshot_service() {
+  echo '[Service]'
+  echo 'Type=oneshot'
+  echo 'ExecStart='"${1}"
+}
+
+#################################################
+# Formats a systemd timer unit.
+# Arguments:
+#   $1. The OnCalendar schedule expression.
+# Outputs:
+#   Prints the formatted unit to stdout.
+#################################################
+format_timer_service() {
+  echo '[Timer]'
+  echo 'OnCalendar='"${1}"
+  echo 'RandomizedDelaySec=1h'
+  echo 'Persistent=true'
+  echo
+  echo '[Install]'
+  echo 'WantedBy=timers.target'
+}
+
+#################################################
+# Formats a polkit rule allowing a group
+# to manage a specific systemd unit.
+# Arguments:
+#   $1. The systemd unit name.
+#   $2. The group name.
+# Outputs:
+#   Prints a JavaScript polkit rule to stdout.
+#################################################
+format_polkit_policy() {
+  echo 'polkit.addRule(function(action, subject) {'
+  echo '    if (action.id == "org.freedesktop.systemd1.manage-units" &&'
+  echo '        action.lookup("unit") == "'"${1}"'" &&'
+  echo '        subject.isInGroup("'"${2}"'")) {'
+  echo '        return polkit.Result.YES;'
+  echo '    }'
+  echo '});'
+}
+
+#################################################
+# Formats a NetworkManager dispatcher script that
+# restarts or reloads a systemd unit on interface
+# state changes.
+# Arguments:
+#   $1. The systemd unit name.
+#   $2. The username to run systemctl under.
+# Outputs:
+#   Prints a POSIX shell script to stdout.
+#################################################
+format_dispatcher_script() {
+  echo '#!/bin/sh'
+  echo '[ "${2}" = "up" -o "${2}" = "down" ] &&'
+  echo 'grep -sqE "type=(eth|wifi)" "${CONNECTION_FILENAME}" &&'
+  echo "${2:+"sudo -u '${2}' "}"'/bin/systemctl '"${2:+"--user "}"'try-reload-or-restart "'"${1}"'" || :'
+}
+
+#################################################
+# Formats a transparent proxy-aware wrapper for
+# the xray executable.
+# Outputs:
+#   Prints the formatted shell script to stdout.
+#################################################
+format_tproxy_script() {
+  echo '#!/bin/sh'
+  echo
+  echo 'XRAY_GID=${XRAY_GID:-"$(id -g xray)"}'
+  echo 'XRAY_GID=${XRAY_GID:-1000}'
+  echo 'XRAY_PID=0'
+  echo 'XRAY_STOP='
+  echo 'XRAY_STATUS=0'
+  echo 'XRAY_SUBNETS=""'
+  echo 'XRAY_GATEWAY_SUBNET=""'
+  echo 'XRAY6_SUBNETS=""'
+  echo 'XRAY6_GATEWAY_SUBNET=""'
+  echo 'XRAY_TPROXY_PORT=${XRAY_TPROXY_PORT:-10000}'
+  echo
+  echo 'command_exists() {'
+  echo '  command -v "${1}" > /dev/null 2>& 1'
+  echo '}'
+  echo
+  echo 'terminate_or_kill() {'
+  echo '  local attempt=0'
+  echo '  kill -TERM $XRAY_PID'
+  echo '  while ps -o pid= -p $XRAY_PID > /dev/null && [ $attempt -lt 50 ]; do'
+  echo '    sleep 0.05'
+  echo '    attempt=$(($attempt + 1))'
+  echo '  done'
+  echo '  [ $attempt -ge 50 ] && kill -KILL $XRAY_PID'
+  echo '}'
+  echo
+  echo 'configure_iptables() {'
+  echo '  command_exists ip && command_exists iptables || return'
+  echo
+  echo '  local action="D"'
+  echo '  local subnet=""'
+  echo '  if [ "${1}" = "add" ] || [ -z "${XRAY_SUBNETS}" ]; then'
+  echo '    XRAY_SUBNETS=$(ip address | awk "/inet /{print \$2}" 2> /dev/null)'
+  echo '    XRAY_GATEWAY_SUBNET=$(ip -o -f inet addr show dev "$(ip route show default | awk "{print \$5}")" 2> /dev/null | awk "{print \$4}")'
+  echo '  fi'
+  echo '  [ -z "${XRAY_SUBNETS}" ] && return'
+  echo
+  echo '  ip rule "${1}" fwmark 1 table 100'
+  echo '  ip route "${1}" local 0.0.0.0/0 dev lo table 100'
+  echo '  if [ "${1}" = "add" ]; then'
+  echo '    action="A"'
+  echo '    iptables -t mangle -N XRAY'
+  echo '    iptables -t mangle -N XRAY_MASK'
+  echo '  fi'
+  echo
+  echo '  for subnet in $XRAY_SUBNETS; do iptables -t mangle -$action XRAY -d $subnet -j RETURN; done'
+  echo '  iptables -t mangle -$action XRAY -d 224.0.0.0/3 -j RETURN'
+  echo '  [ -n "${XRAY_GATEWAY_SUBNET}" ] && iptables -t mangle -$action XRAY ! -s $XRAY_GATEWAY_SUBNET -j RETURN'
+  echo '  iptables -t mangle -$action XRAY -p tcp -j TPROXY --on-port "${XRAY_TPROXY_PORT}" --tproxy-mark 1'
+  echo '  iptables -t mangle -$action XRAY -p udp -j TPROXY --on-port "${XRAY_TPROXY_PORT}" --tproxy-mark 1'
+  echo '  iptables -t mangle -$action PREROUTING -j XRAY'
+  echo '  iptables -t mangle -$action XRAY_MASK -m owner --gid-owner "${XRAY_GID}" -j RETURN'
+  echo '  for subnet in $XRAY_SUBNETS; do iptables -t mangle -$action XRAY_MASK -d $subnet -j RETURN; done'
+  echo '  iptables -t mangle -$action XRAY_MASK -d 224.0.0.0/3 -j RETURN'
+  echo '  iptables -t mangle -$action XRAY_MASK -j MARK --set-mark 1'
+  echo '  iptables -t mangle -$action OUTPUT -p tcp -j XRAY_MASK'
+  echo '  iptables -t mangle -$action OUTPUT -p udp -j XRAY_MASK'
+  echo
+  echo '  if [ "${1}" != "add" ]; then'
+  echo '    iptables -t mangle -X XRAY_MASK'
+  echo '    iptables -t mangle -X XRAY'
+  echo '  fi'
+  echo '}'
+  echo
+  echo 'configure_ip6tables() {'
+  echo '  command_exists ip && command_exists ip6tables || return'
+  echo
+  echo '  local action="D"'
+  echo '  local subnet=""'
+  echo '  if [ "${1}" = "add" ] || [ -z "${XRAY6_SUBNETS}" ]; then'
+  echo '    XRAY6_SUBNETS=$(ip address | awk "/inet6 /{print \$2}" 2> /dev/null)'
+  echo '    XRAY6_GATEWAY_SUBNET=$(ip -o -f inet6 addr show dev "$(ip -6 route show default | awk "{print \$5}")" 2> /dev/null | awk "{print \$4}")'
+  echo '  fi'
+  echo '  [ -z "${XRAY6_SUBNETS}" ] && return'
+  echo
+  echo '  ip -6 rule "${1}" fwmark 1 table 106'
+  echo '  ip -6 route "${1}" local ::/0 dev lo table 106'
+  echo '  if [ "${1}" = "add" ]; then'
+  echo '    action="A"'
+  echo '    ip6tables -t mangle -N XRAY6'
+  echo '    ip6tables -t mangle -N XRAY6_MASK'
+  echo '  fi'
+  echo
+  echo '  for subnet in $XRAY6_SUBNETS; do ip6tables -t mangle -$action XRAY6 -d $subnet -j RETURN; done'
+  echo '  [ -n "${XRAY6_GATEWAY_SUBNET}" ] && ip6tables -t mangle -$action XRAY6 ! -s $XRAY6_GATEWAY_SUBNET -j RETURN'
+  echo '  ip6tables -t mangle -$action XRAY6 -p udp -j TPROXY --on-port "${XRAY_TPROXY_PORT}" --tproxy-mark 1'
+  echo '  ip6tables -t mangle -$action XRAY6 -p tcp -j TPROXY --on-port "${XRAY_TPROXY_PORT}" --tproxy-mark 1'
+  echo '  ip6tables -t mangle -$action PREROUTING -j XRAY6'
+  echo '  ip6tables -t mangle -$action XRAY6_MASK -m owner --gid-owner "${XRAY_GID}" -j RETURN'
+  echo '  for subnet in $XRAY6_SUBNETS; do ip6tables -t mangle -$action XRAY6_MASK -d $subnet -j RETURN; done'
+  echo '  ip6tables -t mangle -$action XRAY6_MASK -j MARK --set-mark 1'
+  echo '  ip6tables -t mangle -$action OUTPUT -p tcp -j XRAY6_MASK'
+  echo '  ip6tables -t mangle -$action OUTPUT -p udp -j XRAY6_MASK'
+  echo
+  echo '  if [ "${1}" != "add" ]; then'
+  echo '    ip6tables -t mangle -X XRAY6_MASK'
+  echo '    ip6tables -t mangle -X XRAY6'
+  echo '  fi'
+  echo '}'
+  echo
+  echo 'main() {'
+  echo '  trap terminate_or_kill USR1'
+  echo '  trap "XRAY_STOP=1; terminate_or_kill" TERM INT QUIT HUP'
+  echo '  while [ -z "${XRAY_STOP}" ] && [ $XRAY_STATUS -eq 0 ]; do'
+  echo '    "$@" &'
+  echo '    XRAY_PID=$!'
+  echo '    configure_iptables add'
+  echo '    configure_ip6tables add'
+  echo '    wait $XRAY_PID'
+  echo '    XRAY_STATUS=$?'
+  echo '    configure_iptables delete'
+  echo '    configure_ip6tables delete'
+  echo '  done'
+  echo '  return $XRAY_STATUS'
+  echo '}'
+  echo
+  echo 'main "$@"'
+}
+
+#################################################
+# Creates a file with given permissions using the
+# output of a command.
+# Arguments:
+#   $1. The target file path.
+#   $2. The chmod value.
+#   ... The command to execute, whose stdout
+#       becomes the file content.
+#################################################
+create_file() {
+  local target_filename="${1}"
+  local target_chmod="${2}"
+  shift 2
+
+  mkdir -m 755 -p "$(dirname "${target_filename}")" &&
+  "$@" > "${target_filename}" && chmod "${target_chmod}" "${target_filename}"
+}
+
+#################################################
+# Prints a brief help message.
+# Arguments:
+#   None
+# Outputs:
+#   Writes the help message to stdout.
+#################################################
+help() {
+  echo "Usage: ${0} [-p <proxy>] [-x <url>] [-b <filename>] [-i <url>] [-s <url>]"
+  echo "       [-t <cn|ir|ir-lite|ru|ru-lite|none>] [-d <directory>] [-l <directory>]"
+  echo "       [-c <filename>] [-P <port>] [-a] [-u <timer>] [-r <command>] [--uninstall]"
+  echo
+  echo "Downloads and configures Xray."
+  echo
+  echo "Examples:"
+  echo "  ${0} --geodata-type none"
+  echo "  ${0} --geodata-type cn --autorun --update weekly"
+  echo "  ${0} -p socks5://127.0.0.1:1080 -P 4242 -t cn --autorun --update weekly"
+  echo "  ${0} --uninstall"
+  echo
+  echo "Options:"
+  echo "  -h, --help"
+  echo "      Display this help page."
+  echo
+  echo "  -p, --proxy <proxy>"
+  echo "      Specify a proxy server to use."
+  echo
+  echo "  -x, --xray-url <url>"
+  echo "      Specify a URL to download the Xray executable."
+  echo
+  echo "  -b, --binary, --xray-path <filename>"
+  echo "      Specify a filename for the Xray executable."
+  echo
+  echo "  -i, --geoip-url <url>"
+  echo "      Specify a URL to download geoip.dat."
+  echo
+  echo "  -s, --geosite-url <url>"
+  echo "      Specify a URL to download geosite.dat."
+  echo
+  echo "  -t, --geodata-type <cn|ir|ir-lite|ru|ru-lite|none>"
+  echo "      Select a predefined pair of geoip.dat and geosite.dat files to download."
+  echo
+  echo "  -d, --data-path, --geodata-path <directory>"
+  echo "      Specify a directory where geoip.dat and geosite.dat should be saved."
+  echo
+  echo "  -l, --log-path <directory>"
+  echo "      Specify a directory where log files should be stored."
+  echo
+  echo "  -c, --config-path <filename>"
+  echo "      Specify a filename for the configuration file."
+  echo
+  echo "  -P, --tproxy-port <port>"
+  echo "      Specify a port for configuring a transparent proxy."
+  echo
+  echo "  -a, --autorun"
+  echo "      Create a service that automatically starts Xray on boot."
+  echo
+  echo "  -u, --update <timer>"
+  echo "      Create a service that automatically updates Xray and/or its associated files."
+  echo "      https://man.archlinux.org/man/systemd.time.7"
+  echo
+  echo "  -r, --reload-command <command>"
+  echo "      Specify a command to execute when Xray or any of its associated files are updated."
+  echo
+  echo "  --uninstall"
+  echo "      Uninstall Xray and all associated files."
+}
+
+#################################################
+# The main entry point for the script.
+# Arguments:
+#   ... A list of the command line arguments.
+#################################################
+main() {
+  local xray_url=$(printf "${XRAY_CORE_URL_TEMPLATE}" "$(get_os)")
+  local xray_filename=""
+  local xray_tproxy_filename=""
+  local dispatcher_filename=""
+  local polkit_policy_filename=""
+  local config_filename=""
+  local geoip_url="${GEOIP_URL_CN}"
+  local geosite_url="${GEOSITE_URL_CN}"
+  local geodata_directory=""
+  local geoip_filename=""
+  local geosite_filename=""
+  local log_directory=""
+  local access_log_filename=""
+  local error_log_filename=""
+  local update_timer=""
+  local update_command=""
+  local systemd_directory=""
+  local systemd_service_filename=""
+  local systemd_update_service_filename=""
+  local systemd_update_timer_filename=""
+  local systemd_is_user=""
+  local systemd_user=""
+  local systemd_user_gid=
+  local systemd_user_flags=""
+  local updated=0
+  local tproxy_port=
+  local autorun=
+  local uninstall=
+
+  # Parse the arguments and options.
+  while [ -n "${1}" ]; do
+    case "${1}" in
+      -h|--help) help; exit 0 ;;
+      -p|--proxy) PROXY="${2}"; shift ;;
+      -x|--xray-url) xray_url="${2}"; shift ;;
+      -b|--binary|--xray-path) xray_filename="${2}"; shift ;;
+      -i|--geoip-url) geoip_url="${2}"; shift ;;
+      -s|--geosite-url) geosite_url="${2}"; shift ;;
+      -t|--geodata-type) case "${2}" in
+        none) geoip_url=""; geosite_url="" ;;
+        cn) geoip_url="${GEOIP_URL_CN}"; geosite_url="${GEOSITE_URL_CN}" ;;
+        ir) geoip_url="${GEOIP_URL_IR}"; geosite_url="${GEOSITE_URL_IR}" ;;
+        ir-lite) geoip_url="${GEOIP_URL_IR_LITE}"; geosite_url="${GEOSITE_URL_IR_LITE}" ;;
+        ru) geoip_url="${GEOIP_URL_RU}"; geosite_url="${GEOSITE_URL_RU}" ;;
+        ru-lite) geoip_url="${GEOIP_URL_RU_LITE}"; geosite_url="${GEOSITE_URL_RU_LITE}" ;;
+        *) fatal_error "invalid geodata type: ${2}" ;; esac; shift ;;
+      -d|--data-path|--geodata-path) geodata_directory="${2}"; shift ;;
+      -l|--log-path) log_directory="${2}"; shift ;;
+      -c|--config-path) config_filename="${2}"; shift ;;
+      -P|--tproxy-port) tproxy_port="${2}"; shift ;;
+      -a|--autorun) autorun=1 ;;
+      -u|--update) update_timer="${2}"; shift ;;
+      -r|--reload-command) update_command="${2}"; shift ;;
+      --uninstall) uninstall=1 ;;
+      -*) fatal_error "invalid option: ${1}" ;;
+      *) fatal_error "invalid argument: ${1}" ;;
+    esac
+    shift 2> /dev/null || fatal_error "missing operand"
+  done
+
+  # Ensure that the script's prerequisites are met.
+  [ -n "${xray_url}" -o -n "${geoip_url}" -o -n "${geosite_url}" ] && assert_command_exists curl
+  [ -n "${xray_url}" ] && assert_command_exists unzip
+  [ -n "${autorun}" -o -n "${update_timer}" ] && assert_command_exists systemctl
+  [ -n "${tproxy_port}" ] && assert_command_exists ip && assert_command_exists iptables
+
+  # Resolve paths based on the provided arguments.
+  if [ "${EUID:-"$(id -u)"}" -eq 0 ]; then
+    xray_filename=$(realpath -m "${xray_filename:-"/usr/local/bin/xray"}")
+    config_filename=$(realpath -m "${config_filename:-"/usr/local/etc/xray/config.json"}")
+    geodata_directory=$(realpath -m "${geodata_directory:-"/usr/local/share/xray"}")
+    log_directory=$(realpath -m "${log_directory:-"/var/log/xray"}")
+    systemd_directory="/etc/systemd/system"
+    systemd_user="xray"
+    systemd_user_flags=${tproxy_port:+"-ou 0"}
+    systemd_user_flags=${systemd_user_flags:-"-r"}
+    xray_tproxy_filename=${tproxy_port:+"$(dirname "${xray_filename}")/xray-tproxy"}
+    polkit_policy_filename=${autorun:+"/etc/polkit-1/rules.d/99-$(basename "${xray_filename}").rules"}
+    dispatcher_filename=${autorun:+"/etc/NetworkManager/dispatcher.d/99-$(basename "${xray_filename}")-reload"}
+  else
+    xray_filename=$(realpath -m "${xray_filename:-"${HOME}/.local/bin/xray"}")
+    config_filename=$(realpath -m "${config_filename:-"${HOME}/.config/xray/config.json"}")
+    geodata_directory=$(realpath -m "${geodata_directory:-"${HOME}/.local/share/xray"}")
+    log_directory=$(realpath -m "${log_directory:-"${HOME}/.local/state/xray"}")
+    systemd_directory="${HOME}/.config/systemd/user"
+    systemd_is_user="--user"
+    [ -z "${tproxy_port}" ] || error "cannot configure transparent proxy: Permission denied" || exit
+    dispatcher_filename=${autorun:+"/etc/NetworkManager/dispatcher.d/99-$(basename "${xray_filename}")-reload-$(id -un)"}
+  fi
+  geoip_filename=${geoip_url:+"${geodata_directory}/geoip.dat"}
+  geosite_filename=${geosite_url:+"${geodata_directory}/geosite.dat"}
+  systemd_service_filename=${autorun:+"${systemd_directory}/xray.service"}
+  systemd_update_service_filename=${update_timer:+"${systemd_directory}/xray-update.service"}
+  systemd_update_timer_filename=${update_timer:+"${systemd_directory}/xray-update.timer"}
+  access_log_filename="${log_directory}/access.log"
+  error_log_filename="${log_directory}/error.log"
+  update_command=${update_command:-"${systemd_service_filename:+"/bin/systemctl $systemd_is_user try-reload-or-restart '$(basename "${systemd_service_filename}")'"}"}
+
+  # If the user has requested uninstallation, undo everything we did.
+  if [ -n "${uninstall}" ]; then
+    systemctl ${systemd_is_user} disable --now "$(basename "${systemd_service_filename}")" 2> /dev/null
+    systemctl ${systemd_is_user} disable --now "$(basename "${systemd_update_timer_filename}")" 2> /dev/null
+    systemctl ${systemd_is_user} disable --now "$(basename "${systemd_update_service_filename}")" 2> /dev/null
+
+    rm -fv "${xray_filename}" "${xray_tproxy_filename}" "${config_filename}" \
+      "${access_log_filename}" "${error_log_filename}" \
+      "${geoip_filename}" "${geosite_filename}" "${dispatcher_filename}" "${polkit_policy_filename}" \
+      "${systemd_service_filename}" "${systemd_update_timer_filename}" "${systemd_update_service_filename}" 2> /dev/null
+
+    [ -f "${dispatcher_filename}" ] && sudo rm -fv "${dispatcher_filename}"
+    [ -x "${0}" ] && command_exists semanage && sudo semanage fcontext -d -t bin_t "$(realpath "${0}")"
+    [ -n "${dispatcher_filename}" ] && command_exists semanage && sudo semanage fcontext -d -t bin_t "${dispatcher_filename}"
+    [ -n "${xray_filename}" ] && command_exists semanage && sudo semanage fcontext -d -t bin_t "${xray_filename}"
+    [ -n "${xray_tproxy_filename}" ] && command_exists semanage && sudo semanage fcontext -d -t bin_t "${xray_tproxy_filename}"
+
+    [ "$(basename "${log_directory}")" = "xray" ] && rm -rf "${log_directory}" 2> /dev/null
+    [ "$(basename "${geodata_directory}")" = "xray" ] && rm -rf "${geodata_directory}" 2> /dev/null
+    [ "$(basename "$(dirname "${config_filename}")")" = "xray" ] && rm -rf "$(dirname "${config_filename}")" 2> /dev/null
+
+    [ -n "${systemd_user}" ] && userdel -rf "${systemd_user}" 2> /dev/null
+    [ -n "${systemd_user}" ] && groupdel -f "${systemd_user}" 2> /dev/null
+    return 0
+  fi
+
+  echo "=== Xray Files ==="
+  [ -n "${xray_filename}" ] && echo "${xray_filename}"
+  [ -n "${xray_tproxy_filename}" ] && echo "${xray_tproxy_filename}"
+  [ -n "${geoip_filename}" ] && echo "${geoip_filename}"
+  [ -n "${geosite_filename}" ] && echo "${geosite_filename}"
+  [ -n "${config_filename}" ] && echo "${config_filename}"
+  [ -n "${access_log_filename}" ] && echo "${access_log_filename}"
+  [ -n "${error_log_filename}" ] && echo "${error_log_filename}"
+  [ -n "${systemd_service_filename}" ] && echo "${systemd_service_filename}"
+  [ -n "${systemd_update_service_filename}" ] && echo "${systemd_update_service_filename}"
+  [ -n "${systemd_update_timer_filename}" ] && echo "${systemd_update_timer_filename}"
+  [ -n "${dispatcher_filename}" ] && echo "${dispatcher_filename}"
+  [ -n "${polkit_policy_filename}" ] && echo "${polkit_policy_filename}"
+  echo "=================="
+
+  # Download/create all required files.
+  [ -z "${xray_url}" ] && error "missing url: skipping xray update"
+  [ -z "${geoip_url}" ] && error "missing url: skipping geoip.dat update"
+  [ -z "${geosite_url}" ] && error "missing url: skipping geosite.dat update"
+  [ -n "${xray_url}" ] && download_and_verify "${xray_url}" "${xray_filename}" && updated=$(($updated + 1))
+  [ -n "${geoip_url}" ] && download_and_verify "${geoip_url}" "${geoip_filename}" && updated=$(($updated + 1))
+  [ -n "${geosite_url}" ] && download_and_verify "${geosite_url}" "${geosite_filename}" && updated=$(($updated + 1))
+  [ -n "${log_directory}" ] && create_file "${access_log_filename}" 620 printf ""
+  [ -n "${log_directory}" ] && create_file "${error_log_filename}" 620 printf ""
+  [ -n "${config_filename}" ] && [ ! -f "${config_filename}" ] && create_file "${config_filename}" 640 format_config "${access_log_filename}" "${error_log_filename}" "${tproxy_port}"
+  [ -n "${xray_tproxy_filename}" ] && create_file "${xray_tproxy_filename}" 755 format_tproxy_script
+
+  # Create a user to run Xray as.
+  if [ -n "${systemd_user}" ]; then
+    id -u "${systemd_user}" > /dev/null 2>& 1 || useradd -MUs /usr/sbin/nologin ${systemd_user_flags} "${systemd_user}" &&
+    systemd_user_gid=$(id -g "${systemd_user}") &&
+    chown -R ":${systemd_user}" "${config_filename}" "${log_directory}" "${geodata_directory}"
+  fi
+
+  # Create a systemd service for managing Xray.
+  if [ -n "${autorun}" ]; then
+    if [ "${EUID:-"$(id -u)"}" -eq 0 ]; then
+      [ -n "${dispatcher_filename}" ] && create_file "${dispatcher_filename}" 500 format_dispatcher_script "$(basename "${systemd_service_filename}")"
+      [ -n "${polkit_policy_filename}" ] && create_file "${polkit_policy_filename}" 755 format_polkit_policy "$(basename "${systemd_service_filename}")" "${systemd_user}"
+    elif [ -n "${dispatcher_filename}" ]; then
+      sudo mkdir -p -m 755 "$(dirname "${dispatcher_filename}")" &&
+      format_dispatcher_script "$(basename "${systemd_service_filename}")" "$(id -un)" | sudo tee "${dispatcher_filename}" > /dev/null &&
+      sudo chmod 500 "${dispatcher_filename}"
+    fi
+
+    command_exists semanage && sudo semanage fcontext -a -t bin_t "${xray_filename}"
+    [ -n "${dispatcher_filename}" ] && command_exists semanage && sudo semanage fcontext -a -t bin_t "${dispatcher_filename}"
+    [ -n "${xray_tproxy_filename}" ] && command_exists semanage && sudo semanage fcontext -a -t bin_t "${xray_tproxy_filename}"
+
+    create_file "${systemd_service_filename}" 644 format_autorun_service "${systemd_user}" "${systemd_user_gid}" "${xray_tproxy_filename}" "${xray_filename}" "${config_filename}" "${geodata_directory}" "${tproxy_port}" &&
+    systemctl ${systemd_is_user} enable "$(basename "${systemd_service_filename}")"
+  fi
+
+  # Create a systemd timer to automatically update Xray.
+  if [ -n "${update_timer}" ]; then
+    local script_filename=$(realpath "${0}")
+    local script_exec="\"${script_filename}\" -p \"${PROXY}\" -x \"${xray_url}\" -b \"${xray_filename}\" -i \"${geoip_url}\" -s \"${geosite_url}\" -d \"${geodata_directory}\" -l \"${log_directory}\" -c \"${config_filename}\" -r \"${update_command}\""
+    command_exists semanage && sudo semanage fcontext -a -t bin_t "${script_filename}"
+
+    create_file "${systemd_update_service_filename}" 644 format_oneshot_service "${script_exec}" &&
+    create_file "${systemd_update_timer_filename}" 644 format_timer_service "${update_timer}" &&
+    systemctl ${systemd_is_user} enable --now "$(basename "${systemd_update_timer_filename}")"
+  fi
+
+  [ $updated -eq 0 ] || sh -c "${update_command}"
+}
+
+main "$@"
