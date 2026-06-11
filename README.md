@@ -19,13 +19,15 @@ An installer script for [Xray](https://github.com/XTLS/Xray-core), best suited f
 3) Run the installer.
     - For a regular setup:
         ```sh
+        # --channel should be one of: release, prerelease
         # --geodata-type should be one of: cn, ir, ir-lite, ru, ru-lite, none
-        xray-install --geodata-type cn --autorun --update weekly
+        xray-install --channel release --geodata-type cn --autorun --update weekly
         ```
     - For a transparent proxy setup:
         ```sh
+        # --channel should be one of: release, prerelease
         # --geodata-type should be one of: cn, ir, ir-lite, ru, ru-lite, none
-        xray-install --geodata-type cn --tproxy-port 4589 --autorun --update weekly
+        xray-install --channel release --geodata-type cn --tproxy-port 4589 --autorun --update weekly
         ```
 
 4) Update the configuration template provided by the installer with your inbounds, outbounds, and other necessary settings.
@@ -53,16 +55,16 @@ An installer script for [Xray](https://github.com/XTLS/Xray-core), best suited f
 ## Usage
 
 ```
-Usage: xray-install [-p <proxy>] [-x <url>] [-b <filename>] [-i <url>] [-s <url>]
-       [-t <cn|ir|ir-lite|ru|ru-lite|none>] [-d <directory>] [-l <directory>]
-       [-c <filename>] [-P <port>] [-a] [-u <timer>] [-r <command>] [--uninstall]
+Usage: xray-install [-p <proxy>] [-x <url>] [-C <release|prerelease>] [-b <filename>]
+       [-i <url>] [-s <url>] [-t <cn|ir|ir-lite|ru|ru-lite|none>] [-d <directory>]
+       [-l <directory>] [-c <filename>] [-P <port>] [-a] [-u <timer>] [-r <command>] [--uninstall]
 
 Downloads and configures Xray.
 
 Examples:
   xray-install --geodata-type none
   xray-install --geodata-type cn --autorun --update weekly
-  xray-install -p socks5://127.0.0.1:10806 -P 4589 -t cn --autorun --update weekly
+  xray-install -p socks5://127.0.0.1:1080 -P 4242 -t cn --autorun --update weekly
   xray-install --uninstall
 
 Options:
@@ -74,6 +76,9 @@ Options:
 
   -x, --xray-url <url>
       Specify a URL to download the Xray executable.
+
+  -C, --xray-channel, --channel <release|prerelease>
+      Specify a channel to download the Xray executable from.
 
   -b, --binary, --xray-path <filename>
       Specify a filename for the Xray executable.
