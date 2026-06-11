@@ -514,9 +514,9 @@ create_file() {
 #   Writes the help message to stdout.
 #################################################
 help() {
-  echo "Usage: ${0} [-p <proxy>] [-x <url>] [-b <filename>] [-i <url>] [-s <url>]"
-  echo "       [-t <cn|ir|ir-lite|ru|ru-lite|none>] [-d <directory>] [-l <directory>]"
-  echo "       [-c <filename>] [-P <port>] [-a] [-u <timer>] [-r <command>] [--uninstall]"
+  echo "Usage: ${0} [-p <proxy>] [-x <url>] [-C <release|prerelease>] [-b <filename>]"
+  echo "       [-i <url>] [-s <url>] [-t <cn|ir|ir-lite|ru|ru-lite|none>] [-d <directory>]"
+  echo "       [-l <directory>] [-c <filename>] [-P <port>] [-a] [-u <timer>] [-r <command>] [--uninstall]"
   echo
   echo "Downloads and configures Xray."
   echo
@@ -535,6 +535,9 @@ help() {
   echo
   echo "  -x, --xray-url <url>"
   echo "      Specify a URL to download the Xray executable."
+  echo
+  echo "  -C, --xray-channel, --channel <release|prerelease>"
+  echo "      Specify a channel to download the Xray executable from."
   echo
   echo "  -b, --binary, --xray-path <filename>"
   echo "      Specify a filename for the Xray executable."
@@ -581,6 +584,7 @@ help() {
 #################################################
 main() {
   local xray_url=$(printf "${XRAY_CORE_URL_TEMPLATE}" "$(get_os)")
+  local xray_channel=""
   local xray_filename=""
   local xray_tproxy_filename=""
   local dispatcher_filename=""
@@ -615,6 +619,10 @@ main() {
       -h|--help) help; exit 0 ;;
       -p|--proxy) PROXY="${2}"; shift ;;
       -x|--xray-url) xray_url="${2}"; shift ;;
+      -C|--xray-channel|--channel) case "${2}" in
+        prerelease|alpha|beta|unstable) xray_channel="prerelease" ;;
+        release|default|stable) xray_channel="release" ;;
+        *) fatal_error "invalid channel type: ${2}" ;; esac; shift ;;
       -b|--binary|--xray-path) xray_filename="${2}"; shift ;;
       -i|--geoip-url) geoip_url="${2}"; shift ;;
       -s|--geosite-url) geosite_url="${2}"; shift ;;
@@ -641,8 +649,9 @@ main() {
   done
 
   # Ensure that the script's prerequisites are met.
-  [ -n "${xray_url}" -o -n "${geoip_url}" -o -n "${geosite_url}" ] && assert_command_exists curl
-  [ -n "${xray_url}" ] && assert_command_exists unzip
+  [ -n "${xray_url}" -o -n "${xray_channel}" -o -n "${geoip_url}" -o -n "${geosite_url}" ] && assert_command_exists curl
+  [ -n "${xray_url}" -o -n "${xray_channel}" ] && assert_command_exists unzip
+  [ -n "${xray_channel}" ] && assert_command_exists jq
   [ -n "${autorun}" -o -n "${update_timer}" ] && assert_command_exists systemctl
   [ -n "${tproxy_port}" ] && assert_command_exists ip && assert_command_exists iptables
 
@@ -720,6 +729,8 @@ main() {
   echo "=================="
 
   # Download/create all required files.
+  [ "${xray_channel}" = "release" ] && xray_url=$(printf "${XRAY_CORE_URL_TEMPLATE}" "$(get_os)")
+  [ "${xray_channel}" = "prerelease" ] && xray_url=$(printf "https://github.com/XTLS/Xray-core/releases/download/%s/Xray-%s.zip" "$(curl -H "Accept: application/vnd.github+json" -fsSL "https://api.github.com/repos/XTLS/Xray-core/releases?per_page=1" | jq -r '.[0].tag_name')" "$(get_os)")
   [ -z "${xray_url}" ] && error "missing url: skipping xray update"
   [ -z "${geoip_url}" ] && error "missing url: skipping geoip.dat update"
   [ -z "${geosite_url}" ] && error "missing url: skipping geosite.dat update"
@@ -760,7 +771,7 @@ main() {
   # Create a systemd timer to automatically update Xray.
   if [ -n "${update_timer}" ]; then
     local script_filename=$(realpath "${0}")
-    local script_exec="\"${script_filename}\" -p \"${PROXY}\" -x \"${xray_url}\" -b \"${xray_filename}\" -i \"${geoip_url}\" -s \"${geosite_url}\" -d \"${geodata_directory}\" -l \"${log_directory}\" -c \"${config_filename}\" -r \"${update_command}\""
+    local script_exec="\"${script_filename}\" -p \"${PROXY}\" -x \"${xray_url}\" -C \"${xray_channel}\" -b \"${xray_filename}\" -i \"${geoip_url}\" -s \"${geosite_url}\" -d \"${geodata_directory}\" -l \"${log_directory}\" -c \"${config_filename}\" -r \"${update_command}\""
     command_exists semanage && sudo semanage fcontext -a -t bin_t "${script_filename}"
 
     create_file "${systemd_update_service_filename}" 644 format_oneshot_service "${script_exec}" &&
